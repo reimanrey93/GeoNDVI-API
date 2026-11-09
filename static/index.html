@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>NDVI por polígono · Demo FastAPI</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css">
+  <style>
+  *{box-sizing:border-box}body{font-family:system-ui,Arial,sans-serif;margin:0;background:#f5f7f7;color:#172c25}
+  header{padding:14px 24px;background:#173d31;color:white}header h1{font-size:22px;margin:0}header p{margin:4px 0 0;color:#d1e3da;font-size:13px}
+  main{display:grid;grid-template-columns:minmax(280px,350px) 1fr;gap:16px;padding:16px;height:calc(100vh - 77px)}
+  aside{background:white;padding:20px;border-radius:12px;overflow:auto;box-shadow:0 2px 12px #0001}
+  #map{height:100%;min-height:420px;border-radius:12px;box-shadow:0 2px 12px #0001}
+  label{font-weight:650;font-size:13px;display:block;margin:14px 0 5px}input{display:block;width:100%;padding:9px;border:1px solid #cad3ce;border-radius:7px}
+  button{margin-top:17px;background:#156b4d;border:0;color:white;border-radius:8px;padding:12px;cursor:pointer;width:100%;font-weight:bold}button:disabled{opacity:.6}
+  small{color:#64736c}.muted{color:#63736b;font-size:13px}#results{font-size:13px;line-height:1.65}#results a{color:#126646}
+  table{border-collapse:collapse;width:100%;font-size:12px}td,th{text-align:left;padding:5px;border-bottom:1px solid #e8eeea;word-break:break-all}
+  @media(max-width:760px){main{display:flex;flex-direction:column;height:auto}#map{height:65vh}}
+  </style>
+</head>
+<body>
+<header><h1>NDVI por polígono</h1><p>Sentinel-2 L2A · Mosaico a 10 m · Metadatos por escena</p></header>
+<main>
+  <aside>
+    <b>1. Dibujá el área de interés</b><p class="muted">Usá la herramienta polígono del mapa (arriba a la izquierda). Para reemplazarlo, dibujá otro.</p>
+    <label for="from">Desde</label><input type="date" id="from" value="2026-06-01">
+    <label for="to">Hasta</label><input type="date" id="to" value="2026-06-30">
+    <label for="cloud">Máxima nubosidad de escena (%)</label><input id="cloud" type="number" min="0" max="100" value="80">
+    <button id="run">2. Calcular NDVI</button>
+    <p id="status" class="muted">Esperando un polígono.</p>
+    <section id="results"></section>
+  </aside>
+  <div id="map"></div>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script>
+const map=L.map('map').setView([-31.63,-60.7],10);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap contributors',maxZoom:19}).addTo(map);
+const drawn=new L.FeatureGroup().addTo(map);
+let geometry=null, overlay=null;
+map.addControl(new L.Control.Draw({draw:{polygon:true,rectangle:true,polyline:false,circle:false,circlemarker:false,marker:false},edit:{featureGroup:drawn}}));
+function updateGeometry(){const layers=drawn.getLayers();geometry=layers.length?layers[0].toGeoJSON().geometry:null;}
+map.on(L.Draw.Event.CREATED,e=>{drawn.clearLayers();drawn.addLayer(e.layer);updateGeometry();document.querySelector('#status').textContent='Polígono seleccionado.';});
+map.on(L.Draw.Event.EDITED,updateGeometry);map.on(L.Draw.Event.DELETED,updateGeometry);
+const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+document.querySelector('#run').onclick=async()=>{
+  const status=document.querySelector('#status'), out=document.querySelector('#results'), btn=document.querySelector('#run');
+  if(!geometry){status.textContent='Primero dibujá un polígono.';return;}
+  status.textContent='Consultando escenas y calculando NDVI…';btn.disabled=true;
+  try{
+    const res=await fetch('/api/ndvi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({geometry,date_from:document.querySelector('#from').value,date_to:document.querySelector('#to').value,max_scene_cloud:Number(document.querySelector('#cloud').value),max_scenes:8})});
+    const data=await res.json();if(!res.ok)throw Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));
+    if(overlay)map.removeLayer(overlay);
+    const [w,s,e,n]=data.bounds_wgs84;
+    overlay=L.imageOverlay(data.png_url,[[s,w],[n,e]],{opacity:.8}).addTo(map);
+    map.fitBounds([[s,w],[n,e]]);
+    status.textContent='Cálculo completado.';
+    out.innerHTML=`<h3>Resultados</h3><p><b>NDVI medio:</b> ${esc(data.ndvi_mean)}<br><b>NDVI mínimo / máximo:</b> ${esc(data.ndvi_min)} / ${esc(data.ndvi_max)}<br><b>Cobertura válida:</b> ${esc(data.valid_coverage_percent)}%<br><b>Nubosidad residual del mosaico:</b> ${esc(data.cloud_cover_aoi_percent)}%<br><b>Fechas usadas:</b> ${esc(data.image_dates.join(', ')||'ninguna')}</p><p><a href="${data.geotiff_url}" download>Descargar NDVI GeoTIFF</a></p><h3>Escenas consultadas</h3><table><tr><th>Fecha UTC</th><th>Nubes del tile</th><th>Nubes en AOI</th><th>Píxeles usados</th></tr>${data.scenes.map(s=>`<tr><td title="${esc(s.id)}">${esc(s.datetime.slice(0,10))}</td><td>${esc(s.cloud_cover_scene_percent)}%</td><td>${esc(s.cloud_cover_aoi_percent)}%</td><td>${esc(s.pixels_contributed)}</td></tr>`).join('')}</table><p class="muted">La nubosidad final se calcula sobre píxeles observados sin NDVI válido y clasificados como nube. No incluye sombra ni ausencia de datos.</p>`;
+  }catch(e){status.textContent='Error: '+e.message;out.innerHTML='';}finally{btn.disabled=false;}
+};
+</script>
+</body></html>
